@@ -1,0 +1,6 @@
+# 依赖与模型（体积大、可重建，绝不进 git）
+.venv/
+mineru-home/
+hf-cache/
+__pycache__/
+*.pyc
