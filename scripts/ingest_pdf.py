@@ -513,17 +513,17 @@ def main():
                     best_dy, best = dy, idx
             attach.setdefault(best if best is not None else -1, []).append(k)
 
+        # **标准 markdown**：不做 exam-go 那种「每行后补空行」的填充 ——
+        # 那是 exam-go 的标注约定，由它的后端自己补（BuildContent）。
+        # 服务对外只承诺「PDF → markdown + 图片」。
         for idx, l in enumerate(kept):
             out_lines.append(l["text"])
-            out_lines.append("")
             for k in attach.get(idx, []):
                 if args.image_url and figs[k].get("file"):
                     out_lines.append(f"![]({args.image_url}/{figs[k]['file']})")
-                    out_lines.append("")
         for k in attach.get(-1, []):   # 找不到归属的图放页尾
             if args.image_url and figs[k].get("file"):
                 out_lines.append(f"![]({args.image_url}/{figs[k]['file']})")
-                out_lines.append("")
 
     with open(args.out, "w", encoding="utf-8") as f:
         f.write("\n".join(out_lines).rstrip("\n") + "\n")
