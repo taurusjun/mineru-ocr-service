@@ -23,9 +23,43 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 # ![Image block](doc:2621aa0/tier:standard/page:1/block:7)
 IMG_REF = re.compile(r"!\[[^\]]*\]\((doc:[^)]+)\)")
+
+
+def ensure_mineru_ready(mineru: str, tier: str) -> None:
+    """把 MinerU 的本地服务准备到「能跑指定档位」的状态（幂等）。
+
+    顺序是实测出来的 —— 换机器最容易在这三步上踩：
+      1. **清陈旧锁 / endpoint**：目录被搬过、或上次进程被杀，会留下
+         `doclib.lock` / `doclib.sock` / `doclib.endpoint.json`，
+         报错分别是「home is currently owned by another doclib server process」
+         和「endpoint belongs to a different MinerU server instance」。
+      2. **server start**：standard/advanced 靠本地 VLM parse-server；没起会报
+         「本地 mineru 服务未运行」。
+      3. **config set parse_server.local.mode managed**：默认是 disabled，
+         会报「Local parse-server is disabled」。**必须在 server start 之后** ——
+         服务没起时这条命令本身就会失败。
+    """
+    home = os.environ.get("MINERU_HOME", "")
+    if home:
+        for stale in ("doclib.lock", "doclib.sock", "doclib.endpoint.json"):
+            p = os.path.join(home, stale)
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                    print(f"   清掉陈旧文件 {stale}", file=sys.stderr)
+                except OSError:
+                    pass
+
+    print("   启动本地 mineru 服务…", file=sys.stderr)
+    run([mineru, "server", "start"], timeout=900)
+    time.sleep(15)
+
+    print("   把 parse-server 设为 managed…", file=sys.stderr)
+    run([mineru, "config", "set", "parse_server.local.mode", "managed"], timeout=120)
 
 
 def run(cmd, timeout=None):
@@ -65,12 +99,13 @@ def main():
     print(f"   调 mineru parse（{args.tier} 档，每页几分钟，请等）…", file=sys.stderr)
     code, out, err = run(cmd, timeout=args.timeout + 300)
 
-    # ⚠️ standard/advanced 档需要**本地 parse-server**（VLM）。没起会直接报
-    # 「本地 mineru 服务未运行」—— 实测踩过：服务被关掉后 mineru 引擎整个失败。
-    # 所以这里自动把它拉起来再重试一次（幂等：已在跑时 start 不会重复起）。
-    if code != 0 and "服务未运行" in err:
-        print("   本地 mineru 服务没在跑，自动启动…", file=sys.stderr)
-        run([mineru, "server", "start"], timeout=600)
+    # 撞到「服务没准备好」就按顺序修一遍再重试（每一步都幂等）。
+    # 这几步的顺序是实测出来的，换机器最容易踩：
+    #   1) 陈旧锁/endpoint —— 目录被搬过、或上次进程被杀，会留下指向旧服务的记录
+    #   2) server start    —— standard/advanced 档靠本地 VLM parse-server
+    #   3) config set managed —— **必须在 server start 之后**（之前会报「服务未运行」）
+    if code != 0 and any(k in err for k in ("服务未运行", "is disabled", "different MinerU server")):
+        ensure_mineru_ready(mineru, args.tier)
         code, out, err = run(cmd, timeout=args.timeout + 300)
 
     if code != 0 or not os.path.exists(tmp_md):
@@ -95,16 +130,11 @@ def main():
                 print(f"   ⚠️ 导出 {locator} 失败：{err.strip()[-160:]}", file=sys.stderr)
     print(f"   导出图片 {n_img} 张", file=sys.stderr)
 
-    # 转成「一行一个标注单元」
-    out_lines = []
-    for line in raw.split("\n"):
-        line = line.rstrip()
-        if line.startswith("<!-- page"):     # MinerU 的页码注释，对标注没用
-            continue
-        if not line.strip():
-            continue
-        out_lines.append(line)
-        out_lines.append("")
+    # **标准 markdown**：只去掉 MinerU 的页码注释与多余空行，
+    # 不做 exam-go 那种行填充（那是它的后端的事）。
+    out_lines = [l.rstrip() for l in raw.split("\n") if not l.startswith("<!-- page")]
+    while out_lines and not out_lines[-1].strip():
+        out_lines.pop()
     open(args.out, "w", encoding="utf-8").write("\n".join(out_lines).rstrip("\n") + "\n")
     print(f"   已写 {args.out}（{len([l for l in out_lines if l.strip()])} 行）", file=sys.stderr)
     return 0
